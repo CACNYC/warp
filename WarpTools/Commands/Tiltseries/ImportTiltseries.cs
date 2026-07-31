@@ -115,6 +115,34 @@ namespace WarpTools.Commands
 
             #endregion
 
+            #region Check for tilt images shared between MDOCs
+
+            // Some acquisition software writes more than one MDOC per tilt series (e.g. PACE
+            // emitting both "x.mdoc" and "x_unsorted.mdoc"). Importing those would silently
+            // create several tilt series backed by the very same tilt images, which then breaks
+            // anything downstream that assumes tilt images belong to exactly one series.
+            {
+                var Overlaps = Mdoc.FindOverlappingMdocs(MdocPaths);
+
+                if (Overlaps.Any())
+                {
+                    StringBuilder Message = new();
+                    Message.AppendLine($"The same tilt image is referenced by more than one MDOC file, which would import the same data as multiple tilt series. Affected MDOC groups ({Overlaps.Count}):");
+
+                    foreach (var Overlap in Overlaps.Take(10))
+                        Message.AppendLine($"  {Overlap.MdocNames}: {Overlap.SharedMovieNames.Length} shared tilt image(s), e.g. {Overlap.SharedMovieNames.First()}");
+
+                    if (Overlaps.Count > 10)
+                        Message.AppendLine($"  ... and {Overlaps.Count - 10} more");
+
+                    Message.Append("Please remove the redundant MDOC files, or skip them using --exclude_pattern (e.g. --exclude_pattern unsorted).");
+
+                    throw new Exception(Message.ToString());
+                }
+            }
+
+            #endregion
+
             #region Find tilt movies
 
             Dictionary<string, Movie> Movies;
@@ -218,9 +246,7 @@ namespace WarpTools.Commands
                                     if (Parts[0] == "TiltAngle")
                                         NewEntry.TiltAngle = (float)Math.Round(float.Parse(Parts[1], CultureInfo.InvariantCulture), 2);
                                     else if (Parts[0] == "SubFramePath")
-                                        // Can't use built-in Path.GetFileName because it won't expect backward slashes when running on Unix
-                                        // but file path most likely comes from a Windows system
-                                        NewEntry.Name = Parts[1].Substring(Math.Max(Parts[1].LastIndexOf('/'), Parts[1].LastIndexOf('\\')) + 1);
+                                        NewEntry.Name = Mdoc.ExtractMovieName(Parts[1]);
                                     else if (Parts[0] == "DateTime")
                                     {
                                         try

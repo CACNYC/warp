@@ -19,6 +19,107 @@ namespace Warp.Tools
             Entries.AddRange(entries);
         }
 
+        /// <summary>
+        /// Extracts the bare file name from an MDOC SubFramePath value. Can't use the built-in
+        /// Path.GetFileName because it won't expect backward slashes when running on Unix, but the
+        /// file path most likely comes from a Windows system.
+        /// </summary>
+        public static string ExtractMovieName(string subFramePath)
+        {
+            return subFramePath.Substring(Math.Max(subFramePath.LastIndexOf('/'), subFramePath.LastIndexOf('\\')) + 1);
+        }
+
+        /// <summary>
+        /// Lists the tilt movies an MDOC file refers to, without any of the validation and filtering
+        /// a full import performs. Files that can't be read yield nothing so callers can report them
+        /// per-MDOC rather than aborting on the spot.
+        /// </summary>
+        public static IEnumerable<string> EnumerateReferencedMovieNames(string mdocPath)
+        {
+            string[] Lines;
+            try
+            {
+                Lines = File.ReadAllLines(mdocPath);
+            }
+            catch
+            {
+                yield break;
+            }
+
+            foreach (string line in Lines)
+            {
+                string[] Parts = line.Split(new[] { " = " }, StringSplitOptions.RemoveEmptyEntries);
+
+                if (Parts.Length >= 2 && Parts[0] == "SubFramePath")
+                    yield return ExtractMovieName(Parts[1]);
+            }
+        }
+
+        /// <summary>
+        /// Finds tilt movies that more than one MDOC file refers to. Some acquisition software writes
+        /// several MDOCs per tilt series (e.g. PACE emitting both "x.mdoc" and "x_unsorted.mdoc");
+        /// importing those would create multiple tilt series backed by the very same tilt images.
+        /// Results are grouped by the set of MDOCs involved and ordered by descending overlap.
+        /// </summary>
+        public static List<MdocOverlap> FindOverlappingMdocs(IEnumerable<string> mdocPaths)
+        {
+            // Which MDOCs refer to each tilt movie
+            Dictionary<string, List<string>> MdocsPerMovie = new Dictionary<string, List<string>>();
+
+            foreach (string mdocPath in mdocPaths)
+            {
+                string MdocName = System.IO.Path.GetFileName(mdocPath);
+                HashSet<string> AlreadyCounted = new HashSet<string>();
+
+                foreach (string movieName in EnumerateReferencedMovieNames(mdocPath))
+                {
+                    // A movie listed twice inside one MDOC is that MDOC's own problem
+                    if (!AlreadyCounted.Add(movieName))
+                        continue;
+
+                    if (!MdocsPerMovie.TryGetValue(movieName, out List<string> SharingMdocs))
+                        MdocsPerMovie[movieName] = SharingMdocs = new List<string>();
+
+                    SharingMdocs.Add(MdocName);
+                }
+            }
+
+            // Group by the set of MDOCs involved, so one entry describes one conflict rather
+            // than one entry per shared tilt movie
+            Dictionary<string, List<string>> MoviesPerMdocGroup = new Dictionary<string, List<string>>();
+
+            foreach (KeyValuePair<string, List<string>> Pair in MdocsPerMovie)
+            {
+                if (Pair.Value.Count < 2)
+                    continue;
+
+                List<string> GroupNames = new List<string>(Pair.Value);
+                GroupNames.Sort(StringComparer.Ordinal);
+                string GroupKey = string.Join(", ", GroupNames);
+
+                if (!MoviesPerMdocGroup.TryGetValue(GroupKey, out List<string> SharedMovies))
+                    MoviesPerMdocGroup[GroupKey] = SharedMovies = new List<string>();
+
+                SharedMovies.Add(Pair.Key);
+            }
+
+            List<MdocOverlap> Result = new List<MdocOverlap>();
+
+            foreach (KeyValuePair<string, List<string>> Pair in MoviesPerMdocGroup)
+            {
+                Pair.Value.Sort(StringComparer.Ordinal);
+                Result.Add(new MdocOverlap { MdocNames = Pair.Key, SharedMovieNames = Pair.Value.ToArray() });
+            }
+
+            Result.Sort((a, b) =>
+            {
+                int ByOverlap = b.SharedMovieNames.Length.CompareTo(a.SharedMovieNames.Length);
+                return ByOverlap != 0 ? ByOverlap : string.CompareOrdinal(a.MdocNames, b.MdocNames);
+            });
+
+            return Result;
+        }
+
         public static Mdoc FromFile(string[] paths, float defaultDose = 0)
         {
             float AxisAngle = 0;
@@ -141,6 +242,18 @@ namespace Warp.Tools
         }
     }
 
+
+    /// <summary>
+    /// A set of MDOC files that refer to some of the same tilt movies.
+    /// </summary>
+    public class MdocOverlap
+    {
+        /// <summary>Comma-separated names of the MDOC files involved, in ordinal order.</summary>
+        public string MdocNames;
+
+        /// <summary>Names of the tilt movies all of those MDOC files refer to.</summary>
+        public string[] SharedMovieNames;
+    }
 
     public class MdocEntry
     {
