@@ -35,6 +35,8 @@ namespace Warp.Workers.Scheduling
             _logDir = logDir;
         }
 
+        public bool IsSingleHost => true;   // all workers are child processes of this manager
+
         public void EnsureWorkers(int target)
         {
             lock (_sync)

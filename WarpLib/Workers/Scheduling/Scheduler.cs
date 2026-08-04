@@ -10,6 +10,7 @@ namespace Warp.Workers.Scheduling
     /// write manager heartbeat, sweep stalled workers (via worker heartbeats,
     /// never the cluster scheduler), process failures (matrix + blacklist +
     /// re-pend/poison), top up via the provisioner. Exits when the queue drains.
+    /// The blacklist half only runs for multi-host pools — see <c>hostBlacklistEnabled</c>.
     /// </summary>
     public class Scheduler : IDisposable
     {
@@ -21,6 +22,7 @@ namespace Warp.Workers.Scheduling
         private readonly long _workerStartupGraceMs;
         private readonly HeartbeatWriter _managerHeartbeat;
         private readonly FailureMatrix _failures;
+        private readonly bool _hostBlacklistEnabled;
         private readonly string _logDir;   // external per-item log dir; null → fall back to _layout.Logs
         private FileStream _lockHandle;
 
@@ -35,9 +37,20 @@ namespace Warp.Workers.Scheduling
         // running/<wid>/ out from under it (duplicate work + the MarkSick crash described
         // in WorkerProcess.cs). Keeping both sides at 120 s avoids that asymmetry; tests
         // inject smaller values to exercise sweeping quickly.
+        /// <param name="hostBlacklistEnabled">
+        /// Whether a host that accumulates failures may be excluded from the pool.
+        /// Blacklisting only makes sense with more than one host to fall back on:
+        /// excluding the single node of a local run leaves nobody to do the work, so
+        /// this run — and every later run sharing the queue dir — silently stalls at
+        /// 0 done (issue #499). Data-shaped failures (missing input files) hit that
+        /// path easily, because they fail on whatever host tries them. Defaults to
+        /// false for a <see cref="LocalProvisioner"/> pool and true otherwise; pass
+        /// an explicit value to override.
+        /// </param>
         public Scheduler(QueueLayout layout, TaskQueue queue, IWorkerProvisioner provisioner,
                          int target, long workerStallTimeoutMs = 120_000, long workerStartupGraceMs = 120_000,
-                         FailureMatrix failureMatrix = null, string logDir = null)
+                         FailureMatrix failureMatrix = null, string logDir = null,
+                         bool? hostBlacklistEnabled = null)
         {
             _layout = layout;
             _queue = queue;
@@ -46,6 +59,7 @@ namespace Warp.Workers.Scheduling
             _workerStallTimeoutMs = workerStallTimeoutMs;
             _workerStartupGraceMs = workerStartupGraceMs;
             _logDir = logDir;
+            _hostBlacklistEnabled = hostBlacklistEnabled ?? !provisioner.IsSingleHost;
             _managerHeartbeat = new HeartbeatWriter(layout.Heartbeat, "tick-");
 
             // Load persisted failure matrix if one exists (spec §A2), then apply
@@ -69,6 +83,14 @@ namespace Warp.Workers.Scheduling
                     $"Another manager is already using queue dir '{layout.Root}'. " +
                     "Use --task_dir to choose a different location, or wait for the previous run to finish.");
             }
+
+            // Markers survive in the queue dir between runs, and a worker that finds
+            // one for its own host exits immediately. With blacklisting off there is
+            // nothing to honour them, and a marker written by an earlier run (or an
+            // earlier Warp version) would keep the pool empty forever — so drop them.
+            if (!_hostBlacklistEnabled && Directory.Exists(_layout.Blacklist))
+                foreach (string marker in Directory.GetFiles(_layout.Blacklist))
+                    try { File.Delete(marker); } catch { }
         }
 
         public bool IsDrained()
@@ -108,12 +130,7 @@ namespace Warp.Workers.Scheduling
                 if (!string.IsNullOrEmpty(t.FailedOnHost))
                 {
                     _failures.RecordFailure(t.FailedOnHost, t.TaskId);
-                    foreach (string host in _failures.BlacklistedHosts())
-                    {
-                        string marker = Path.Combine(_layout.Blacklist, host);
-                        if (!File.Exists(marker))
-                            try { File.WriteAllText(marker, "blacklisted"); } catch { }
-                    }
+                    PublishBlacklist();
                 }
 
                 bool willPoison = _failures.ShouldPoison(t.TaskId) || _failures.ShouldPoisonByRetry(t.RetryCount + 1);
@@ -139,6 +156,28 @@ namespace Warp.Workers.Scheduling
                     File.Delete(f);
                     _queue.Enqueue(t);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Write a marker for every host that has crossed the blacklist threshold, so
+        /// workers on it self-exclude (spec §12.3). No-op when blacklisting is disabled
+        /// (local mode). Each newly written marker is announced on stderr: a host
+        /// dropping out of the pool is a big deal, and silently doing it is what made
+        /// issue #499 so hard to diagnose.
+        /// </summary>
+        private void PublishBlacklist()
+        {
+            if (!_hostBlacklistEnabled) return;
+
+            foreach (string host in _failures.BlacklistedHosts())
+            {
+                string marker = Path.Combine(_layout.Blacklist, host);
+                if (File.Exists(marker)) continue;
+                try { File.WriteAllText(marker, "blacklisted"); } catch { continue; }
+                Console.Error.WriteLine(
+                    $"[pool] host {host} blacklisted after repeated failures — its workers will " +
+                    $"stop claiming tasks. Delete {marker} to re-enable it.");
             }
         }
 
@@ -212,12 +251,7 @@ namespace Warp.Workers.Scheduling
 
                         // Blacklist host if it hit the threshold.
                         if (crashedHost != null)
-                            foreach (string h in _failures.BlacklistedHosts())
-                            {
-                                string marker = Path.Combine(_layout.Blacklist, h);
-                                if (!File.Exists(marker))
-                                    try { File.WriteAllText(marker, "blacklisted"); } catch { }
-                            }
+                            PublishBlacklist();
 
                         TryRemoveEmptyDir(wdir);
                     }

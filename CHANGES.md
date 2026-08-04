@@ -2,6 +2,10 @@
 
 ## v2.0.0dev40
 
+### Bug Fixes
+
+- **Single-node runs stalling at 0 processed items after a failed command** ([#499](https://github.com/warpem/warp/issues/499)): the scheduler's bad-node blacklist assumed a multi-host pool. A few failures with no host cause at all — missing input files, for example, which fail on whichever host tries them — were enough to blacklist the only machine available, after which workers exited immediately on startup and every subsequent command using the same `tasks` directory showed normal initialization but no progress. Blacklisting is now disabled whenever all workers are local processes, and any marker left behind by an earlier run is cleared at startup, so affected task directories recover on their own. In cluster mode, where blacklisting is still useful, excluding a host is now reported on stderr instead of happening silently.
+
 ### New Features
 
 - **`ts_export_particles --dont_premultiply`**: 2D particle export can now write particle stacks without CTF premultiplication or RELION weighting, for use with tools that expect non-premultiplied particles (e.g. tomoDRGN). Existing output is unchanged when the flag is not passed.

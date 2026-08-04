@@ -6,5 +6,6 @@ namespace Warp.Workers.Scheduling
         public void EnsureWorkers(int target) { }
         public int LiveWorkerCount() => 0;
         public void Shutdown() { }
+        public bool IsSingleHost => false;   // the external system may place workers anywhere
     }
 }

@@ -14,5 +14,13 @@ namespace Warp.Workers.Scheduling
 
         /// <summary>Tear down any workers this provisioner owns.</summary>
         void Shutdown();
+
+        /// <summary>
+        /// True when every worker in the pool necessarily runs on this machine. The
+        /// Scheduler uses this to decide whether host blacklisting is meaningful:
+        /// with one host there is no other node to fall back on, so excluding it
+        /// would just stall the run.
+        /// </summary>
+        bool IsSingleHost { get; }
     }
 }

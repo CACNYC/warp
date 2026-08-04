@@ -206,6 +206,8 @@ namespace Warp.Workers.Scheduling
                 queueDir: queueDir, workersPerJob: perDevice);
         }
 
+        public bool IsSingleHost => false;   // the batch scheduler places jobs on any node
+
         public void EnsureWorkers(int target)
         {
             lock (_sync)

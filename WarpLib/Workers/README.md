@@ -41,7 +41,7 @@ queue_dir/
   poisoned/      <task_id>.json        ← exceeded retry cap (terminal)
   heartbeat/     tick-NNNNNN          ← manager liveness tick (latest only)
   sick/          <wid>                ← hardware-excluded workers
-  blacklisted_nodes/  <hostname>      ← hosts blacklisted by FailureMatrix
+  blacklisted_nodes/  <hostname>      ← hosts blacklisted by FailureMatrix (multi-host pools only)
   logs/          <wid>.exit           ← per-worker exit reason
 ```
 
@@ -128,6 +128,23 @@ Exception during task execution
     │                           │    CONTINUE; no reset (amortization preserved)
     └───────────────────────────┘
 ```
+
+---
+
+## Host blacklisting is multi-host only
+
+`FailureMatrix` excludes a host once N *distinct* tasks have failed on it, by writing
+`blacklisted_nodes/<hostname>`; workers self-exclude when they find a marker for their
+own machine. That only makes sense when there is another node to fall back on, so the
+Scheduler turns it off whenever `IWorkerProvisioner.IsSingleHost` is true (local mode)
+and clears any markers left in the queue dir by an earlier run. Without that, a handful
+of failures with no host cause at all — missing input files, say, which fail on
+whichever host tries them — would blacklist the only machine available, and this run
+plus every later run sharing the queue dir would sit at 0 done with nothing in stdout
+explaining why (issue #499). Blacklisting a host is now also announced on stderr.
+
+Pass `hostBlacklistEnabled` explicitly to the `Scheduler` constructor to override the
+`IsSingleHost`-derived default.
 
 ---
 

@@ -27,6 +27,17 @@ public class SchedulerTests : IDisposable
         public void EnsureWorkers(int target) => Target = target;
         public int LiveWorkerCount() => 0;
         public void Shutdown() { }
+        // Multi-host by default so the blacklist tests exercise the enabled path;
+        // the local-mode tests pass hostBlacklistEnabled explicitly.
+        public bool IsSingleHost => false;
+    }
+
+    private class FakeLocalProvisioner : IWorkerProvisioner
+    {
+        public void EnsureWorkers(int target) { }
+        public int LiveWorkerCount() => 0;
+        public void Shutdown() { }
+        public bool IsSingleHost => true;
     }
 
     [Fact]
@@ -116,6 +127,89 @@ public class SchedulerTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_layout.Blacklist, "nodeA"))); // no marker before processing
 
         sched.Tick(); // processes both failures: 2 distinct tasks on nodeA -> blacklisted
+        Assert.True(File.Exists(Path.Combine(_layout.Blacklist, "nodeA")));
+    }
+
+    [Fact]
+    public void BlacklistingIsAnnouncedOnStderr()
+    {
+        var sched = new Scheduler(_layout, _queue, new FakeProvisioner(), target: 1,
+            failureMatrix: new FailureMatrix(hostBlacklistThreshold: 1, taskPoisonThreshold: 99, retryCap: 99));
+        EnqueueClaimFail("0000001-a", "w1", "nodeA");
+
+        var captured = new StringWriter();
+        var previous = Console.Error;
+        try
+        {
+            Console.SetError(captured);
+            sched.Tick();
+        }
+        finally
+        {
+            Console.SetError(previous);
+            sched.Dispose();
+        }
+
+        Assert.Contains("nodeA", captured.ToString());
+        Assert.Contains("blacklist", captured.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Single-host (local) mode: blacklisting disabled ─────────────────────
+
+    [Fact]
+    public void SingleHostProvisionerDoesNotBlacklistHost()
+    {
+        // threshold=1 would blacklist on the very first failure if enabled. No explicit
+        // hostBlacklistEnabled here: the default must come from IsSingleHost.
+        using var sched = new Scheduler(_layout, _queue, new FakeLocalProvisioner(), target: 1,
+            failureMatrix: new FailureMatrix(hostBlacklistThreshold: 1, taskPoisonThreshold: 99, retryCap: 99));
+
+        EnqueueClaimFail("0000001-a", "w1", "nodeA");
+        sched.Tick();
+
+        Assert.False(File.Exists(Path.Combine(_layout.Blacklist, "nodeA")),
+            "local mode must never blacklist the only host available");
+        Assert.Equal(1, _queue.Summary().Pending);   // retry still happens
+    }
+
+    [Fact]
+    public void SingleHostProvisionerDoesNotBlacklistHostOnWorkerStall()
+    {
+        var t = new TaskItem { TaskId = "0000001-a", Main = new Warp.Tools.NamedSerializableObject[0] };
+        t.ComputeInitFingerprint();
+        _queue.Enqueue(t);
+        _queue.ClaimOne("local-dead-gpu0");
+        File.WriteAllText(Path.Combine(_layout.RunningFor("local-dead-gpu0"), "hostname"), "nodeA");
+
+        using var sched = new Scheduler(_layout, _queue, new FakeLocalProvisioner(), target: 1,
+            workerStallTimeoutMs: 0, workerStartupGraceMs: 0,
+            failureMatrix: new FailureMatrix(hostBlacklistThreshold: 1, taskPoisonThreshold: 99, retryCap: 99));
+
+        sched.Tick();
+
+        Assert.False(File.Exists(Path.Combine(_layout.Blacklist, "nodeA")));
+    }
+
+    [Fact]
+    public void SingleHostProvisionerClearsStaleBlacklistMarkers()
+    {
+        // A marker left behind by an earlier run (e.g. one made before blacklisting was
+        // disabled for local mode) makes every worker on this host self-exclude, and the
+        // run hangs at 0 done with nothing in stdout to explain it — issue #499.
+        File.WriteAllText(Path.Combine(_layout.Blacklist, "nodeA"), "blacklisted");
+
+        using var sched = new Scheduler(_layout, _queue, new FakeLocalProvisioner(), target: 1);
+
+        Assert.False(File.Exists(Path.Combine(_layout.Blacklist, "nodeA")));
+    }
+
+    [Fact]
+    public void MultiHostProvisionerKeepsExistingBlacklistMarkers()
+    {
+        File.WriteAllText(Path.Combine(_layout.Blacklist, "nodeA"), "blacklisted");
+
+        using var sched = new Scheduler(_layout, _queue, new FakeProvisioner(), target: 1);
+
         Assert.True(File.Exists(Path.Combine(_layout.Blacklist, "nodeA")));
     }
 
