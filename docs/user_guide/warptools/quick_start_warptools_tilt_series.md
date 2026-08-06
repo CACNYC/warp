@@ -633,7 +633,7 @@ WarpTools ts_import \
 --frameseries warp_frameseries \
 --tilt_exposure 2.64 \
 --min_intensity 0.3 \
---dont_invert \ # (1)!
+--dont_invert \# (1)!
 --output tomostar
 ```
 
